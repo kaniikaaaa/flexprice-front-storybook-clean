@@ -1,0 +1,169 @@
+import { useCallback, useEffect, useState } from 'react';
+import { CalendarIcon, X } from 'lucide-react';
+import { Button, Calendar, Popover, PopoverContent, PopoverTrigger } from '@/components/ui';
+import type { CalendarTimezone } from '@/components/ui/calendar';
+import { cn } from '@/lib/utils';
+import { startOfMonth } from 'date-fns';
+import {
+	formatDateInZone,
+	startOfDayInZone,
+	convertDateToTimezone,
+	toCalendarDisplayDate,
+	type DateTimezone,
+} from '@/utils/common/format_date';
+
+interface Props {
+	startDate?: Date;
+	endDate?: Date;
+	placeholder?: string;
+	disabled?: boolean;
+	title?: string;
+	minDate?: Date;
+	maxDate?: Date;
+	onChange: (dates: { startDate?: Date; endDate?: Date }) => void;
+	className?: string;
+	labelClassName?: string;
+	popoverClassName?: string;
+	popoverTriggerClassName?: string;
+	popoverContentClassName?: string;
+}
+
+const DateRangePicker = ({
+	startDate,
+	endDate,
+	onChange,
+	placeholder = 'Select Range',
+	disabled,
+	title,
+	minDate,
+	maxDate,
+	className,
+	labelClassName,
+	popoverClassName,
+	popoverTriggerClassName,
+	popoverContentClassName,
+}: Props) => {
+	const [open, setOpen] = useState(false);
+	const [selectedRange, setSelectedRange] = useState<{ from: Date; to?: Date } | undefined>(undefined);
+	const [timezone, setTimezone] = useState<CalendarTimezone>('local');
+
+	const currentMonth = startOfMonth(new Date());
+
+	const toRangeInZone = useCallback(
+		(from: Date, to: Date) => {
+			const fromValue = timezone === 'utc' ? startOfDayInZone(from.getFullYear(), from.getMonth(), from.getDate(), 'utc') : from;
+			const toValue = timezone === 'utc' ? startOfDayInZone(to.getFullYear(), to.getMonth(), to.getDate(), 'utc') : to;
+			return { from: fromValue, to: toValue };
+		},
+		[timezone],
+	);
+
+	const handleSelect = useCallback(
+		(date: { from?: Date; to?: Date } | undefined) => {
+			if (!date || !date.from) {
+				setSelectedRange(undefined);
+				onChange({ startDate: undefined, endDate: undefined });
+				return;
+			}
+			if (date.to) {
+				const range = toRangeInZone(date.from, date.to);
+				setSelectedRange(range);
+				onChange({ startDate: range.from, endDate: range.to });
+			} else {
+				setSelectedRange({ from: date.from });
+				onChange({ startDate: date.from, endDate: undefined });
+			}
+		},
+		[onChange, toRangeInZone],
+	);
+
+	const handleTimezoneChange = useCallback(
+		(newTz: CalendarTimezone) => {
+			if (selectedRange?.from && selectedRange?.to) {
+				const fromConverted = convertDateToTimezone(selectedRange.from, timezone as DateTimezone, newTz as DateTimezone);
+				const toConverted = convertDateToTimezone(selectedRange.to, timezone as DateTimezone, newTz as DateTimezone);
+				setSelectedRange({ from: fromConverted, to: toConverted });
+				onChange({ startDate: fromConverted, endDate: toConverted });
+			}
+			setTimezone(newTz);
+		},
+		[selectedRange, timezone, onChange],
+	);
+
+	const isComplete = !!(selectedRange?.from && selectedRange?.to);
+
+	useEffect(() => {
+		if (startDate && endDate) {
+			setSelectedRange({ from: startDate, to: endDate });
+		} else {
+			setSelectedRange(undefined);
+		}
+	}, [startDate, endDate]);
+
+	const displayRange = selectedRange?.from
+		? {
+				from: toCalendarDisplayDate(selectedRange.from, timezone as DateTimezone),
+				to: selectedRange.to ? toCalendarDisplayDate(selectedRange.to, timezone as DateTimezone) : undefined,
+			}
+		: undefined;
+
+	const displayLabel =
+		selectedRange?.from && selectedRange.to
+			? `${formatDateInZone(selectedRange.from, timezone as DateTimezone)} - ${formatDateInZone(selectedRange.to, timezone as DateTimezone)}`
+			: placeholder;
+
+	return (
+		<Popover open={open} onOpenChange={setOpen}>
+			<div className={cn('flex flex-col', popoverTriggerClassName)}>
+				{title && <div className={cn('text-sm font-medium mb-1 w-full text-start', labelClassName)}>{title}</div>}
+				<div className='relative'>
+					<PopoverTrigger asChild disabled={disabled}>
+						<Button
+							variant='outline'
+							type='button'
+							className={cn(
+								' justify-start text-left font-normal !h-10',
+								!isComplete ? 'text-muted-foreground opacity-70 hover:text-muted-foreground' : 'text-black',
+								!className && (isComplete ? 'w-[260px]' : 'w-[240px]'),
+								'transition-all duration-300 ease-in-out',
+								className,
+							)}>
+							<CalendarIcon className='mr-0 h-4 w-4' />
+							<span>{displayLabel}</span>
+						</Button>
+					</PopoverTrigger>
+					{isComplete && (
+						<button
+							type='button'
+							aria-label='Clear range'
+							className='absolute right-2 top-[12px] h-4 w-4 cursor-pointer text-muted-foreground hover:text-foreground'
+							onClick={(e) => {
+								e.stopPropagation();
+								setSelectedRange(undefined);
+								onChange({ startDate: undefined, endDate: undefined });
+							}}>
+							<X className='h-4 w-4' />
+						</button>
+					)}
+				</div>
+			</div>
+
+			<PopoverContent className={cn('w-auto flex gap-4 p-2', popoverClassName, popoverContentClassName)} align='start'>
+				<Calendar
+					disabled={disabled}
+					mode='range'
+					selected={displayRange}
+					onSelect={handleSelect}
+					fromDate={minDate}
+					toDate={maxDate}
+					defaultMonth={currentMonth}
+					numberOfMonths={2}
+					timezone={timezone}
+					onTimezoneChange={handleTimezoneChange}
+				/>
+			</PopoverContent>
+		</Popover>
+	);
+};
+
+export default DateRangePicker;

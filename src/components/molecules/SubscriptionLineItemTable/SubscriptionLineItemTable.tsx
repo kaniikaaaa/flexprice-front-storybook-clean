@@ -1,0 +1,504 @@
+import { Card, CardHeader, NoDataCard, Chip, Tooltip } from '@/components/atoms';
+import type { SubscriptionCommitmentInfo } from '@/models/Subscription';
+import { ChargeValueCell, ColumnData, FlexpriceTable, TerminateLineItemModal, DropdownMenu } from '@/components/molecules';
+import { PriceTooltip } from '@/components/molecules/PriceTooltip';
+import { LineItem, SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE } from '@/models/Subscription';
+import { FC, useState, useCallback, useMemo } from 'react';
+import { Trash2, Pencil, Info } from 'lucide-react';
+import { ENTITY_STATUS } from '@/models/base';
+import { formatBillingPeriodForDisplay, getCurrencySymbol, getPriceTypeLabel } from '@/utils/common/helper_functions';
+import { PRICE_ENTITY_TYPE, PRICE_STATUS, PRICE_TYPE } from '@/models/Price';
+import { formatDateTimeWithSecondsAndTimezone } from '@/utils/common/format_date';
+
+interface Props {
+	data: LineItem[];
+	onEdit?: (lineItem: LineItem) => void;
+	onTerminate?: (lineItemId: string, endDate?: string) => void;
+	isLoading?: boolean;
+	hideCardWrapper?: boolean;
+	commitmentInfo?: SubscriptionCommitmentInfo;
+	/** When true, edit/terminate actions are disabled (e.g. inherited subscription). */
+	readOnly?: boolean;
+	/** Optional map `subscription_phase_id` → label (enables Phase column). */
+	phaseLabelsById?: Record<string, string>;
+	/** When false, empty data does not render the built-in NoDataCard (parent handles empty UX). */
+	showNoDataCard?: boolean;
+	/** Subtitle when `showNoDataCard` renders (e.g. filtered empty vs no rows). */
+	noDataSubtitle?: string;
+}
+
+interface LineItemWithStatus extends LineItem {
+	precomputedStatus: PRICE_STATUS;
+	statusVariant: 'info' | 'default' | 'success';
+	statusLabel: string;
+	tooltipContent: React.ReactNode;
+}
+
+interface LineItemDropdownProps {
+	row: LineItem;
+	isEditDisabled: boolean;
+	isTerminateDisabled: boolean;
+	onEdit: (lineItem: LineItem) => void;
+	onTerminate: (lineItem: LineItem) => void;
+}
+
+const LineItemDropdown: FC<LineItemDropdownProps> = ({ row, isEditDisabled, isTerminateDisabled, onEdit, onTerminate }) => {
+	const [isOpen, setIsOpen] = useState(false);
+
+	const handleClick = (e: React.MouseEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setIsOpen(!isOpen);
+	};
+
+	return (
+		<div data-interactive='true' onClick={handleClick}>
+			<DropdownMenu
+				isOpen={isOpen}
+				onOpenChange={setIsOpen}
+				options={[
+					{
+						label: 'Edit',
+						icon: <Pencil />,
+						onSelect: (e: Event) => {
+							e.preventDefault();
+							setIsOpen(false);
+							onEdit(row);
+						},
+						disabled: isEditDisabled,
+					},
+					{
+						label: 'Terminate',
+						icon: <Trash2 />,
+						onSelect: (e: Event) => {
+							e.preventDefault();
+							setIsOpen(false);
+							onTerminate(row);
+						},
+						disabled: isTerminateDisabled,
+					},
+				]}
+			/>
+		</div>
+	);
+};
+
+const getLineItemStatus = (lineItem: LineItem): PRICE_STATUS => {
+	const now = new Date();
+	const defaultEndDate = '0001-01-01T00:00:00Z';
+
+	if (lineItem.start_date && lineItem.start_date.trim() !== '') {
+		const startDate = new Date(lineItem.start_date);
+		if (!isNaN(startDate.getTime()) && startDate > now) {
+			return PRICE_STATUS.UPCOMING;
+		}
+	}
+
+	if (lineItem.end_date && lineItem.end_date.trim() !== '' && lineItem.end_date !== defaultEndDate) {
+		const endDate = new Date(lineItem.end_date);
+		if (!isNaN(endDate.getTime()) && endDate < now) {
+			return PRICE_STATUS.INACTIVE;
+		}
+	}
+
+	return PRICE_STATUS.ACTIVE;
+};
+
+const getEntityLabel = (entityType?: string): string => {
+	if (!entityType) return '--';
+	switch (entityType.toLowerCase()) {
+		case SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.PLAN:
+			return 'Plan';
+		case SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.ADDON:
+			return 'Addon';
+		case SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.SUBSCRIPTION:
+			return 'Subscription';
+		default:
+			return entityType;
+	}
+};
+
+type EntityChipVariant = 'default' | 'info' | 'success' | 'warning';
+
+const getEntityChipVariant = (entityType?: string): EntityChipVariant => {
+	if (!entityType) return 'default';
+	switch (entityType.toLowerCase()) {
+		case SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.PLAN:
+			return 'info';
+		case SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.SUBSCRIPTION:
+			return 'success';
+		case SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.ADDON:
+			return 'warning';
+		default:
+			return 'default';
+	}
+};
+
+const getStatusChipVariant = (status: PRICE_STATUS): 'info' | 'default' | 'success' => {
+	switch (status) {
+		case PRICE_STATUS.UPCOMING:
+			return 'info';
+		case PRICE_STATUS.INACTIVE:
+			return 'default';
+		case PRICE_STATUS.ACTIVE:
+			return 'success';
+		default:
+			return 'success';
+	}
+};
+
+const formatLineItemDateTooltip = (lineItem: LineItem): React.ReactNode => {
+	const dateItems: React.ReactNode[] = [];
+	const defaultEndDate = '0001-01-01T00:00:00Z';
+
+	if (lineItem.start_date && lineItem.start_date.trim() !== '') {
+		try {
+			const startDate = new Date(lineItem.start_date);
+			if (!isNaN(startDate.getTime())) {
+				dateItems.push(
+					<div key='start' className='flex items-center gap-2'>
+						<span className='text-xs font-medium text-gray-500'>Start</span>
+						<span className='text-sm font-medium'>{formatDateTimeWithSecondsAndTimezone(startDate)}</span>
+					</div>,
+				);
+			}
+		} catch {
+			// Ignore invalid dates
+		}
+	}
+
+	if (lineItem.end_date && lineItem.end_date.trim() !== '' && lineItem.end_date !== defaultEndDate) {
+		try {
+			const endDate = new Date(lineItem.end_date);
+			if (!isNaN(endDate.getTime())) {
+				dateItems.push(
+					<div key='end' className='flex items-center gap-2'>
+						<span className='text-xs font-medium text-gray-500'>End</span>
+						<span className='text-sm font-medium'>{formatDateTimeWithSecondsAndTimezone(endDate)}</span>
+					</div>,
+				);
+			}
+		} catch {
+			// Ignore invalid dates
+		}
+	}
+
+	if (dateItems.length === 0) {
+		return <span className='text-sm'>No date information</span>;
+	}
+
+	return <div className='flex flex-col gap-2'>{dateItems}</div>;
+};
+
+// Show icon only on USAGE line items when subscription has enable_true_up = true
+const shouldShowCommitmentIcon = (lineItem: LineItem, commitmentInfo?: SubscriptionCommitmentInfo): boolean => {
+	return commitmentInfo?.enable_true_up === true && lineItem.price_type?.toUpperCase() === 'USAGE';
+};
+
+const formatCommitmentTooltip = (info: SubscriptionCommitmentInfo): React.ReactNode => {
+	const rows: React.ReactNode[] = [];
+
+	if (info.commitment_amount != null) {
+		rows.push(
+			<div key='amount' className='flex items-center gap-2'>
+				<span className='text-xs font-medium text-gray-500'>Commitment Amount</span>
+				<span className='text-sm font-medium'>{`${getCurrencySymbol(info.currency ?? '')}${info.commitment_amount}`}</span>
+			</div>,
+		);
+	}
+	if (info.overage_factor != null) {
+		rows.push(
+			<div key='overage' className='flex items-center gap-2'>
+				<span className='text-xs font-medium text-gray-500'>Overage Factor</span>
+				<span className='text-sm font-medium'>{info.overage_factor}×</span>
+			</div>,
+		);
+	}
+	if (info.enable_true_up != null) {
+		rows.push(
+			<div key='trueup' className='flex items-center gap-2'>
+				<span className='text-xs font-medium text-gray-500'>True-up</span>
+				<span className='text-sm font-medium'>{info.enable_true_up ? 'Enabled' : 'Disabled'}</span>
+			</div>,
+		);
+	}
+	if (info.commitment_duration) {
+		rows.push(
+			<div key='duration' className='flex items-center gap-2'>
+				<span className='text-xs font-medium text-gray-500'>Duration</span>
+				<span className='text-sm font-medium capitalize'>{info.commitment_duration.toLowerCase()}</span>
+			</div>,
+		);
+	}
+
+	return <div className='flex flex-col gap-2'>{rows}</div>;
+};
+
+const SubscriptionLineItemTable: FC<Props> = ({
+	data,
+	onEdit,
+	onTerminate,
+	isLoading,
+	hideCardWrapper = false,
+	commitmentInfo,
+	readOnly = false,
+	phaseLabelsById,
+	showNoDataCard = true,
+	noDataSubtitle,
+}) => {
+	const [showTerminateModal, setShowTerminateModal] = useState(false);
+	const [selectedLineItem, setSelectedLineItem] = useState<LineItem | null>(null);
+
+	const handleEditClick = useCallback(
+		(lineItem: LineItem) => {
+			onEdit?.(lineItem);
+		},
+		[onEdit],
+	);
+
+	const handleTerminateClick = useCallback((lineItem: LineItem) => {
+		setSelectedLineItem(lineItem);
+		setShowTerminateModal(true);
+	}, []);
+
+	const handleTerminateConfirm = (endDate: string | undefined) => {
+		if (selectedLineItem) onTerminate?.(selectedLineItem.id, endDate);
+		setShowTerminateModal(false);
+		setSelectedLineItem(null);
+	};
+
+	const handleTerminateCancel = () => {
+		setShowTerminateModal(false);
+		setSelectedLineItem(null);
+	};
+
+	const handleDialogChange = (open: boolean) => {
+		if (!open) {
+			setShowTerminateModal(false);
+			setSelectedLineItem(null);
+		}
+	};
+
+	const processedLineItems = useMemo<LineItemWithStatus[]>(() => {
+		if (!data || data.length === 0) return [];
+
+		const lineItemsWithStatus: LineItemWithStatus[] = data.map((lineItem) => {
+			const status = getLineItemStatus(lineItem);
+			return {
+				...lineItem,
+				precomputedStatus: status,
+				statusVariant: getStatusChipVariant(status),
+				statusLabel: status.charAt(0).toUpperCase() + status.slice(1),
+				tooltipContent: formatLineItemDateTooltip(lineItem),
+			};
+		});
+
+		const statusOrder: Record<PRICE_STATUS, number> = {
+			[PRICE_STATUS.ACTIVE]: 0,
+			[PRICE_STATUS.UPCOMING]: 1,
+			[PRICE_STATUS.INACTIVE]: 2,
+		};
+
+		return lineItemsWithStatus.sort((a, b) => statusOrder[a.precomputedStatus] - statusOrder[b.precomputedStatus]);
+	}, [data]);
+
+	const hasMultipleEntityTypes = useMemo(() => {
+		if (!data?.length) return false;
+		const types = new Set(data.map((item) => (item.entity_type ?? '').toLowerCase()).filter(Boolean));
+		return types.size > 1;
+	}, [data]);
+
+	const columns: ColumnData<LineItemWithStatus>[] = useMemo(
+		() => [
+			{
+				title: 'Display Name',
+				render: (row: LineItemWithStatus) => (
+					<div className='flex items-center gap-1'>
+						<span>{row.display_name}</span>
+						{shouldShowCommitmentIcon(row, commitmentInfo) && (
+							<Tooltip
+								content={formatCommitmentTooltip(commitmentInfo!)}
+								delayDuration={0}
+								sideOffset={5}
+								className='bg-white border border-gray-200 shadow-lg text-sm text-gray-900 px-4 py-3 rounded-[6px] max-w-[320px]'>
+								<button
+									type='button'
+									data-interactive='true'
+									className='inline-flex items-center rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'>
+									<Info className='h-4 w-4 text-blue-500 flex-shrink-0' />
+								</button>
+							</Tooltip>
+						)}
+					</div>
+				),
+			},
+			...(phaseLabelsById && Object.keys(phaseLabelsById).length > 0
+				? [
+						{
+							title: 'Phase',
+							render: (row: LineItemWithStatus) => (
+								<span className='text-sm text-gray-700'>
+									{(row.subscription_phase_id && phaseLabelsById[row.subscription_phase_id]) ?? '—'}
+								</span>
+							),
+						},
+					]
+				: []),
+			{
+				title: 'Price Type',
+				render: (row) => <span>{getPriceTypeLabel(row.price_type)}</span>,
+			},
+			{
+				title: 'Billing Period',
+				render: (row) => formatBillingPeriodForDisplay(row.billing_period),
+			},
+			{
+				title: 'Quantity',
+				render: (row) => {
+					if (row.price_type === PRICE_TYPE.USAGE) {
+						return <span className='text-gray-500'>--</span>;
+					}
+
+					const q = row.quantity;
+					if (q == null || !Number.isFinite(Number(q))) return <span className='text-gray-500'>--</span>;
+					const n = Number(q);
+					return (
+						<span className='tabular-nums'>{Number.isInteger(n) ? n : n.toLocaleString(undefined, { maximumFractionDigits: 6 })}</span>
+					);
+				},
+			},
+			...(hasMultipleEntityTypes
+				? [
+						{
+							title: 'Source',
+							render: (row: LineItemWithStatus) => (
+								<Chip label={getEntityLabel(row.entity_type)} variant={getEntityChipVariant(row.entity_type)} />
+							),
+						},
+					]
+				: []),
+			{
+				title: 'Status',
+				render(rowData) {
+					return (
+						<Tooltip
+							content={rowData.tooltipContent}
+							delayDuration={0}
+							sideOffset={5}
+							className='bg-white border border-gray-200 shadow-lg text-sm text-gray-900 px-4 py-3 rounded-[6px] max-w-[320px]'>
+							<span>
+								<Chip label={rowData.statusLabel} variant={rowData.statusVariant} />
+							</span>
+						</Tooltip>
+					);
+				},
+			},
+			{
+				title: 'Charge',
+				render: (row) => {
+					if (!row.price) return '--';
+					const isSubscriptionOverride =
+						row.price.entity_type === PRICE_ENTITY_TYPE.SUBSCRIPTION && row.entity_type === SUBSCRIPTION_LINE_ITEM_ENTITY_TYPE.PLAN;
+					return (
+						<div className='flex items-center gap-2'>
+							<ChargeValueCell data={row.price} />
+							{isSubscriptionOverride && <PriceTooltip data={row.price} isSubscriptionOverride={true} />}
+						</div>
+					);
+				},
+			},
+			{
+				fieldVariant: 'interactive',
+				width: '48px',
+				hideOnEmpty: true,
+				render: (row) => {
+					const isArchived = row.status === ENTITY_STATUS.ARCHIVED;
+					const defaultEndDate = '0001-01-01T00:00:00Z';
+					const hasEndDate = !!(row.end_date && row.end_date.trim() !== '' && row.end_date !== defaultEndDate);
+					const isTerminateDisabled = readOnly || isArchived || hasEndDate;
+					const isEditDisabled = readOnly || isArchived || hasEndDate;
+
+					return (
+						<LineItemDropdown
+							row={row}
+							isEditDisabled={isEditDisabled}
+							isTerminateDisabled={isTerminateDisabled}
+							onEdit={handleEditClick}
+							onTerminate={handleTerminateClick}
+						/>
+					);
+				},
+			},
+		],
+		[hasMultipleEntityTypes, commitmentInfo, handleEditClick, handleTerminateClick, readOnly, phaseLabelsById],
+	);
+
+	if (isLoading) {
+		if (hideCardWrapper) {
+			return (
+				<div className='p-4'>
+					<div className='animate-pulse space-y-4'>
+						<div className='h-4 bg-gray-200 rounded w-3/4'></div>
+						<div className='h-4 bg-gray-200 rounded w-1/2'></div>
+						<div className='h-4 bg-gray-200 rounded w-5/6'></div>
+					</div>
+				</div>
+			);
+		}
+		return (
+			<Card variant='notched'>
+				<CardHeader title='Subscription Line Items' />
+				<div className='p-4'>
+					<div className='animate-pulse space-y-4'>
+						<div className='h-4 bg-gray-200 rounded w-3/4'></div>
+						<div className='h-4 bg-gray-200 rounded w-1/2'></div>
+						<div className='h-4 bg-gray-200 rounded w-5/6'></div>
+					</div>
+				</div>
+			</Card>
+		);
+	}
+
+	if ((!processedLineItems || processedLineItems.length === 0) && showNoDataCard) {
+		return <NoDataCard title='Charges' subtitle={noDataSubtitle ?? 'No charges found for this subscription'} />;
+	}
+
+	const isEmpty = !processedLineItems || processedLineItems.length === 0;
+
+	return (
+		<>
+			{selectedLineItem && (
+				<TerminateLineItemModal
+					isOpen={showTerminateModal}
+					onOpenChange={handleDialogChange}
+					onCancel={handleTerminateCancel}
+					onConfirm={handleTerminateConfirm}
+					isLoading={isLoading}
+				/>
+			)}
+
+			{hideCardWrapper ? (
+				<FlexpriceTable
+					showEmptyRow={isEmpty}
+					data={processedLineItems ?? []}
+					columns={columns}
+					variant='no-bordered'
+					tableClassName='table-fixed'
+				/>
+			) : (
+				<Card variant='notched'>
+					<CardHeader title='Charges' />
+					<FlexpriceTable
+						showEmptyRow={isEmpty}
+						data={processedLineItems ?? []}
+						columns={columns}
+						variant='no-bordered'
+						tableClassName='table-fixed'
+					/>
+				</Card>
+			)}
+		</>
+	);
+};
+
+export default SubscriptionLineItemTable;
